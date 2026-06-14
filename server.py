@@ -348,42 +348,33 @@ def main():
                         format="%(asctime)s %(levelname)s %(message)s")
 
     if use_http:
-        # SSE transport over HTTP. We MUST disable TrustedHostMiddleware
-        # before mcp.run() builds the Starlette app, otherwise hosted
-        # platforms (Render, Fly, Railway) where Host header doesn't match
-        # localhost get 421 Misdirected Request.
-        _disable_trusted_host_middleware()
-
+        # SSE transport over HTTP. We build the Starlette app ourselves and
+        # strip TrustedHostMiddleware so PaaS providers (Render, Fly, Railway)
+        # whose Host header is dynamic don't get blocked with 421
+        # "Invalid Host header". Render's edge proxy already validates
+        # routing — we don't need that protection inside our process.
+        import uvicorn
         logging.info("Starting SSE HTTP transport on %s:%d "
                      "(GET /sse + POST /messages/{session_id})",
                      args.host, args.port)
-        mcp.settings.host = args.host
-        mcp.settings.port = args.port
-        mcp.run(transport="sse")
+        app = mcp.sse_app()
+        before = len(app.user_middleware)
+        app.user_middleware = [
+            m for m in app.user_middleware
+            if "TrustedHost" not in m.cls.__name__
+        ]
+        # Force Starlette to rebuild the middleware stack on next request
+        app.middleware_stack = None
+        after = len(app.user_middleware)
+        if after < before:
+            logging.info("Removed TrustedHostMiddleware (%d -> %d middlewares)",
+                         before, after)
+        uvicorn.run(app, host=args.host, port=args.port,
+                    log_level="info", access_log=True,
+                    forwarded_allow_ips="*")
     else:
         logging.info("Starting stdio transport")
         mcp.run(transport="stdio")
-
-
-def _disable_trusted_host_middleware() -> None:
-    """Patch Starlette's TrustedHostMiddleware to allow any Host header.
-
-    On Render/Fly/Railway the public hostname (xxx.onrender.com) differs
-    from the bind address. Starlette's default TrustedHostMiddleware sees
-    this mismatch as a misdirected request and returns 421. We don't need
-    that protection — Render's edge proxy already validates routing.
-    """
-    try:
-        import starlette.middleware.trustedhost as thm
-        _orig_init = thm.TrustedHostMiddleware.__init__
-
-        def _allow_all_init(self, app, allowed_hosts=None, www_redirect=True):
-            _orig_init(self, app, allowed_hosts=["*"], www_redirect=False)
-
-        thm.TrustedHostMiddleware.__init__ = _allow_all_init
-        logging.info("TrustedHostMiddleware patched to accept any Host header")
-    except Exception as e:
-        logging.warning("Could not patch TrustedHostMiddleware: %s", e)
 
 
 if __name__ == "__main__":
