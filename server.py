@@ -348,10 +348,16 @@ def main():
                         format="%(asctime)s %(levelname)s %(message)s")
 
     if use_http:
-        logging.info("Starting HTTP/SSE transport on %s:%d", args.host, args.port)
+        # SSE transport — wider PaaS/proxy support than streamable-http,
+        # and Smithery + Claude Desktop + Cursor all consume it.
+        # streamable-http is "newer" but Render/Cloudflare-proxied setups
+        # tend to hit 421 Misdirected Request due to HTTP/2 multiplexing quirks.
+        logging.info("Starting SSE HTTP transport on %s:%d "
+                     "(GET /sse + POST /messages/{session_id})",
+                     args.host, args.port)
         mcp.settings.host = args.host
         mcp.settings.port = args.port
-        mcp.run(transport="streamable-http")
+        mcp.run(transport="sse")
     else:
         logging.info("Starting stdio transport")
         mcp.run(transport="stdio")
