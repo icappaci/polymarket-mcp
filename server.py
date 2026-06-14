@@ -91,15 +91,51 @@ def _get_snapshot(force_refresh: bool = False) -> dict | None:
 
 @mcp.tool()
 def get_top_wallets(limit: int = 25) -> dict:
-    """Top Polymarket wallets ranked by realized PnL (last 30 days).
+    """Get the top-performing Polymarket wallets ranked by realized profit
+    over the last 30 days.
 
-    Uses the latest signed Oracle snapshot (refreshed every minute on our side).
-    Useful for: smart-money tracking, copy-trade strategies, alpha-trader
-    discovery, building wallet leaderboards.
+    USE THIS WHEN the user asks any of:
+      - "Who are the top traders on Polymarket?"
+      - "Show me the most profitable wallets"
+      - "Which addresses have been winning lately?"
+      - "Find me alpha traders / smart money"
+      - "Build a leaderboard of Polymarket whales"
+
+    Each wallet entry includes: 0x address, 30-day realized PnL in USD,
+    number of closed trades, wins, win rate. Wallets are pre-filtered to
+    only include those with >=5 closed trades AND positive PnL (filters
+    out lucky one-shotters and pure losers).
+
+    Data source: hosted signed Oracle snapshot, ECDSA-signed by us
+    (secp256k1, same curve as Ethereum). The snapshot.signer_address is
+    verifiable on-chain — you can prove the data wasn't tampered with.
+    Snapshot refreshes every 60 seconds; this tool serves an in-memory
+    cache (30s TTL) so back-to-back calls are free.
+
+    COMMONLY COMBINED WITH:
+      - get_wallet_history(address) — drill into what a top wallet just did
+      - get_smart_money_flow() — see what top wallets are buying RIGHT NOW
 
     Args:
-        limit: Max wallets to return (1-100, default 25). Snapshot already
-               contains the top 100 — this just caps the result.
+        limit: How many wallets to return, ranked best-to-worst.
+               Range 1-100, default 25. The underlying snapshot already
+               contains the top 100 — this just truncates.
+
+    Returns: {
+      "lookback_days": 30,
+      "snapshot_generated_at": ISO timestamp of last data refresh,
+      "signer_address": 0x... (signer of the underlying snapshot),
+      "n_wallets": int (== min(limit, 100)),
+      "wallets": [
+        {
+          "address": "0x...",
+          "realized_pnl_30d": float (USD),
+          "win_rate": float (0..1),
+          "n_trades_30d": int,
+          "wins_30d": int
+        }, ...
+      ]
+    }
     """
     limit = max(1, min(int(limit), 100))
     snap = _get_snapshot()
@@ -119,12 +155,54 @@ def get_top_wallets(limit: int = 25) -> dict:
 
 @mcp.tool()
 def get_top_markets(limit: int = 25) -> dict:
-    """Top active Polymarket markets by volume (last 30 days).
+    """Get the highest-volume active Polymarket markets right now.
 
-    Reads from the same signed Oracle snapshot as get_top_wallets.
+    USE THIS WHEN the user asks any of:
+      - "What's hot on Polymarket?"
+      - "Show me the biggest prediction markets"
+      - "Which markets have the most trading volume?"
+      - "What are people betting on?"
+      - "Find markets I should pay attention to"
+
+    Returns active (not yet resolved) markets sorted by total trading
+    volume. Each entry includes slug (use it as input to get_market_info
+    or get_wallet_history filters), title, USD volume, liquidity, end
+    date, and current outcome prices.
+
+    Markets span every category Polymarket lists: politics, crypto,
+    sports, entertainment, geopolitics, weather, science. If the user
+    asks for a specific category, you'll need to filter the response
+    yourself by checking the slug prefix or title.
+
+    Data source: same signed Oracle snapshot as get_top_wallets
+    (refreshed every 60s, cached 30s in-memory). The first call may take
+    1-2 seconds; subsequent calls return instantly from cache.
+
+    COMMONLY COMBINED WITH:
+      - get_market_info(slug) — drill into one market's full detail
+      - get_smart_money_flow() — see if any top wallets are positioned
+        in these markets
 
     Args:
-        limit: Max markets to return (1-100, default 25).
+        limit: How many markets to return, ranked by volume desc.
+               Range 1-100, default 25. The snapshot already holds the
+               top 50 — values >50 silently saturate at 50.
+
+    Returns: {
+      "snapshot_generated_at": ISO timestamp,
+      "n_markets": int,
+      "markets": [
+        {
+          "slug": "btc-updown-5m-...",
+          "condition_id": "0x...",
+          "title": "Will Brazil win on 2026-06-13?",
+          "end_date_utc": ISO timestamp,
+          "volume_usd": float,
+          "liquidity_usd": float,
+          "outcomes": [{"name": str, "price": float}, ...]
+        }, ...
+      ]
+    }
     """
     limit = max(1, min(int(limit), 100))
     snap = _get_snapshot()
@@ -140,14 +218,58 @@ def get_top_markets(limit: int = 25) -> dict:
 
 @mcp.tool()
 def get_wallet_history(wallet: str, limit: int = 50) -> dict:
-    """Recent trade history for a specific Polymarket wallet (live).
+    """Get the recent trade history for a specific Polymarket wallet — LIVE,
+    not cached. Reads directly from Polymarket's Data API.
 
-    Pulls the latest TRADE events directly from Polymarket's public Data API.
-    Use this for real-time tracking of a specific trader.
+    USE THIS WHEN the user:
+      - Asks "what did wallet 0x... do?" or pastes a wallet address
+      - Wants to track a specific trader's moves
+      - Got a wallet from get_top_wallets() and wants to see their actual
+        trades
+      - Needs the latest activity (within seconds) for a wallet — this
+        tool is live, not cached
+
+    Each trade returns: timestamp (unix + ISO), market slug, market title,
+    outcome the wallet picked, side (BUY/SELL), size in shares, price per
+    share, total USD value, on-chain condition_id, and outcome_index.
+
+    NOTE: Polymarket users have TWO addresses — their "EOA" (the wallet
+    they signed in with) and their "proxy wallet" (the address that
+    actually holds positions and trades). This tool needs the PROXY
+    wallet (42-char 0x address). get_top_wallets returns proxy addresses
+    directly, so you can pass those straight in.
+
+    Returns the most recent trades, newest first. Most wallets have
+    hundreds-to-thousands of trades total, so limit acts as a recency
+    window (limit=50 gives you "last 50 trades" not "all trades").
+
+    COMMONLY COMBINED WITH:
+      - get_top_wallets() — first find a top wallet, then call this on
+        their address
+      - get_market_info(slug) — drill into the market a wallet just
+        entered
 
     Args:
-        wallet: 0x-prefixed Polymarket wallet address (proxy address).
-        limit:  Number of recent trades to return (1-200, default 50).
+        wallet: 0x-prefixed 42-character Polymarket proxy wallet address.
+                Must be exactly 42 chars including the 0x prefix.
+        limit:  How many recent trades, newest first. Range 1-200,
+                default 50.
+
+    Returns: {
+      "wallet": "0x...",
+      "n_trades": int,
+      "trades": [
+        {
+          "ts_unix": int, "ts_iso": ISO timestamp,
+          "slug": "market-slug", "title": "Market question?",
+          "outcome": "Yes" | "No" | "Up" | team name | etc.,
+          "side": "BUY" | "SELL",
+          "size_shares": float, "price": float (0..1), "value_usd": float,
+          "condition_id": "0x...", "outcome_index": 0 | 1
+        }, ...
+      ]
+    }
+    Returns {"error": ..., "hint": ...} on invalid wallet format or API failure.
     """
     if not wallet or not wallet.startswith("0x") or len(wallet) != 42:
         return {"error": "invalid_wallet",
@@ -184,12 +306,52 @@ def get_wallet_history(wallet: str, limit: int = 50) -> dict:
 
 @mcp.tool()
 def get_market_info(slug: str) -> dict:
-    """Detailed info about a Polymarket market by slug.
+    """Get full details about a single Polymarket market by its slug —
+    works for both active AND closed/resolved markets.
 
-    Uses Polymarket's Gamma API. Works for both active and closed markets.
+    USE THIS WHEN the user:
+      - Mentions a specific market by slug (e.g. 'btc-updown-5m-...',
+        'mlb-nyy-tor-2026-06-13', 'will-trump-win-2028')
+      - Asks "what's the question on market X?"
+      - Asks "did market X resolve? what was the outcome?"
+      - Pastes a Polymarket URL — extract the slug from the URL path
+      - Wants outcomes, prices, end date, resolution source for one market
+
+    Slugs come from many sources:
+      - get_top_markets() / get_wallet_history() responses
+      - URL paths on polymarket.com (the part after /event/)
+      - Polymarket activity feeds
+
+    Returns full market metadata: human title, description, end/start
+    dates, current closed/active status, total volume + liquidity in USD,
+    list of outcomes with their CLOB token IDs (needed for orderbook
+    queries), and the resolution source URL (e.g. ESPN, MLB.com, an X
+    post — explains who/what decides the outcome).
+
+    Data source: Polymarket's Gamma API. Live, not cached. ~200ms latency.
+
+    COMMONLY COMBINED WITH:
+      - get_wallet_history — see who traded this market
+      - get_smart_money_flow — check if top wallets touched this market
+        in recent activity (filter the response's slug field)
 
     Args:
-        slug: Market slug (e.g. 'btc-updown-5m-1781000000', 'mlb-nyy-tor-2026-06-13').
+        slug: The market's URL slug. Examples:
+              'mlb-nyy-tor-2026-06-13', 'btc-updown-5m-1781000000',
+              'will-trump-be-2028-republican-nominee'.
+              No prefix, no URL — just the slug itself.
+
+    Returns: {
+      "slug": str, "condition_id": "0x...",
+      "title": "Will X happen?", "description": "Long-form rules text",
+      "end_date_utc": ISO, "start_date_utc": ISO,
+      "closed": bool, "active": bool,
+      "volume_usd": float, "liquidity_usd": float,
+      "outcomes": ["Yes", "No"] | ["Brazil", "Morocco", "Draw"] | etc.,
+      "clob_token_ids": ["123...", "456..."] (one per outcome, same order),
+      "resolution_source": URL or text describing what decides the outcome
+    }
+    Returns {"error": "not_found", ...} if the slug doesn't exist.
     """
     if not slug:
         return {"error": "missing_slug"}
@@ -235,17 +397,74 @@ def get_smart_money_flow(
     top_wallets_n: int = 20,
     max_results: int = 50,
 ) -> dict:
-    """Recent BUY trades from top-performing Polymarket wallets ('smart money flow').
+    """Find what TOP PERFORMERS are buying RIGHT NOW on Polymarket.
+    This is the headline composite tool of this server.
 
-    Combines the top-N wallets from our signed Oracle snapshot with live
-    activity from each wallet via Polymarket Data API. Filters to BUYs in
-    the last N minutes — surfaces markets where smart money is accumulating
-    right now.
+    USE THIS WHEN the user asks any of:
+      - "What's smart money doing right now?"
+      - "Are whales accumulating anywhere?"
+      - "Where is alpha flowing on Polymarket today?"
+      - "Show me where the best traders just entered positions"
+      - "Any unusual concentration of top wallets in one market?"
+
+    HOW IT WORKS (internally): pulls the top-N wallets ranked by 30-day
+    realized PnL (same source as get_top_wallets), then queries each
+    wallet's recent activity via Polymarket's Data API, filters to BUYs
+    inside the lookback window, and returns the combined feed sorted
+    newest-first. One call → one combined view across many wallets.
+
+    This is the kind of signal that's hard to assemble from raw APIs
+    (would normally require: top wallets query + N parallel activity
+    queries + filter + sort + merge). The tool wraps all that into a
+    single LLM-callable.
+
+    Each entry includes WHO bought (wallet address), THEIR track record
+    (30d PnL, win rate — for context on credibility), WHAT they bought
+    (slug, title, outcome), at WHAT price, for HOW MUCH USD, and WHEN.
+
+    Concentration analysis: if you see 3+ wallets buying the same slug
+    within minutes, that's a high-confidence signal. The LLM should
+    surface this pattern in its summary when present.
+
+    INTERPRETATION CAVEATS:
+      - Polymarket Data API typically lags 5-30 seconds behind on-chain
+        truth. "Real-time" here means ~30s freshness, not millisecond.
+      - A single top wallet entering doesn't mean others will follow.
+        Multi-wallet concentration is the stronger signal.
+      - Smart money can be wrong — track record is base rate, not certainty.
 
     Args:
-        lookback_minutes: Look only at trades from the last N minutes (1-1440, default 60).
-        top_wallets_n:    How many top wallets to query (1-50, default 20).
-        max_results:      Cap on returned trades (1-200, default 50).
+        lookback_minutes: Time window for "recent" — only trades within
+                          the last N minutes are returned. Range 1-1440
+                          (1 min to 24 h), default 60. Use 5-15 for
+                          "right now", 60-180 for "this morning", 1440
+                          for "today".
+        top_wallets_n:    How many top-PnL wallets to scan. Range 1-50,
+                          default 20. Higher = broader signal but slower
+                          (one HTTP call per wallet to Data API).
+        max_results:      Cap the returned trade list. Range 1-200,
+                          default 50. Wallets often have many trades in
+                          a short window — without a cap one whale's
+                          activity could dominate the response.
+
+    Returns: {
+      "lookback_minutes": int,
+      "top_wallets_scanned": int,
+      "n_flow": int (== len(smart_money_buys)),
+      "smart_money_buys": [
+        {
+          "wallet": "0x...",
+          "wallet_pnl_30d": float (USD — credibility signal),
+          "wallet_win_rate": float (0..1),
+          "ts_unix": int, "ts_iso": ISO,
+          "slug": "market-slug", "title": "Question?",
+          "outcome": "Yes" | team-name | etc.,
+          "price": float (0..1 — entry price on Polymarket),
+          "size_usd": float,
+          "condition_id": "0x..."
+        }, ...
+      ]  (sorted newest-first)
+    }
     """
     lookback_minutes = max(1, min(int(lookback_minutes), 1440))
     top_wallets_n = max(1, min(int(top_wallets_n), 50))
@@ -301,14 +520,52 @@ def get_smart_money_flow(
 
 @mcp.tool()
 def get_signed_snapshot() -> dict:
-    """Current ECDSA-signed Polymarket data snapshot.
+    """Get the current ECDSA-signed Polymarket data snapshot — the full
+    JSON document with cryptographic signature attached.
 
-    Returns the full signed JSON (top markets + top wallets + signature block).
-    Same source as our public Oracle endpoint — verify the signature against
-    the published signer address.
+    USE THIS WHEN the user:
+      - Needs verifiable / tamper-proof Polymarket data (audit trails,
+        compliance, on-chain integrations)
+      - Asks for "raw snapshot" or "the full data dump"
+      - Wants to verify provenance — "prove this came from Polymarket
+        and wasn't modified"
+      - Is building a smart contract / DeFi protocol that needs an
+        oracle feed from prediction markets
 
-    Useful for: on-chain references, immutable audit trails, decentralized
-    verification of Polymarket data.
+    HOW SIGNING WORKS: each snapshot is signed with secp256k1 (the same
+    elliptic curve Ethereum uses). The signature covers a SHA-256 hash
+    of the canonical JSON (sorted keys, no whitespace). Consumers
+    re-compute the hash, ecrecover the signer address from the signature,
+    and check it matches the published signer (0x1C2Dd3AFA33cF338332C47024BdB747d3240551C).
+    If both match → data integrity proven.
+
+    For most LLM agent use cases (research, "show me X") you do NOT
+    need this tool — use get_top_wallets / get_top_markets / etc.
+    instead, which extract the relevant fields from this same snapshot
+    in a cleaner format. This tool is for the EDGE CASE where you need
+    the full signed envelope.
+
+    Verification reference implementation:
+    https://github.com/icappaci/polymarket-mcp/blob/main/verify_snapshot.py
+    (Python, ~30 lines, uses eth-account library)
+
+    Returns: {
+      "schema_version": str,
+      "generated_at_utc": ISO timestamp,
+      "generated_at_unix": int,
+      "lookback_days": 30,
+      "top_markets": [ ... 50 entries ... ],
+      "top_wallets_by_30d_pnl": [ ... 100 entries ... ],
+      "signature": {
+        "signer_address": "0x1C2D...551C",
+        "algorithm": "ECDSA-secp256k1 over SHA256(canonical_json)",
+        "digest_sha256": "hex string",
+        "signature_hex": "hex string (65 bytes)",
+        "recoverable": true
+      }
+    }
+    Size: ~37 KB. Refresh interval: 60 seconds on origin, 30 seconds
+    cached here in the MCP server.
     """
     snap = _get_snapshot()
     if not snap:
@@ -320,13 +577,25 @@ def get_signed_snapshot() -> dict:
 
 @mcp.resource("polymarket://wallets/top")
 def resource_top_wallets() -> str:
-    """Top 25 Polymarket wallets by 30-day PnL (JSON)."""
+    """Static reference resource: the top 25 Polymarket wallets by 30-day
+    realized PnL, as a JSON document.
+
+    Use this resource when you want a stable read-only reference (e.g. for
+    grounding context at the start of an agent session). For dynamic
+    queries with arguments (custom limit, etc.) use the get_top_wallets
+    tool instead.
+    """
     return json.dumps(get_top_wallets(), indent=2)
 
 
 @mcp.resource("polymarket://markets/top")
 def resource_top_markets() -> str:
-    """Top 25 active Polymarket markets by volume (JSON)."""
+    """Static reference resource: the top 25 active Polymarket markets by
+    trading volume, as a JSON document.
+
+    Use this resource for stable context grounding. For dynamic queries
+    (custom limit, filters) use the get_top_markets tool instead.
+    """
     return json.dumps(get_top_markets(), indent=2)
 
 
