@@ -355,12 +355,12 @@ def main():
 
     if use_http:
         # MCP's DNS rebinding protection is disabled above (TransportSecuritySettings).
-        # Run via uvicorn directly so we control host/port/proxy-headers cleanly.
+        # Streamable HTTP is the modern MCP transport (replaces SSE) — required
+        # for proper Smithery hosted gateway integration. Endpoint: POST /mcp
         import uvicorn
-        logging.info("Starting SSE HTTP transport on %s:%d "
-                     "(GET /sse + POST /messages/{session_id})",
+        logging.info("Starting Streamable HTTP transport on %s:%d (POST /mcp)",
                      args.host, args.port)
-        app = mcp.sse_app()
+        app = mcp.streamable_http_app()
         uvicorn.run(app, host=args.host, port=args.port,
                     log_level="info", access_log=True,
                     forwarded_allow_ips="*")
