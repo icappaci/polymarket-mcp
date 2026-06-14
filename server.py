@@ -348,10 +348,12 @@ def main():
                         format="%(asctime)s %(levelname)s %(message)s")
 
     if use_http:
-        # SSE transport — wider PaaS/proxy support than streamable-http,
-        # and Smithery + Claude Desktop + Cursor all consume it.
-        # streamable-http is "newer" but Render/Cloudflare-proxied setups
-        # tend to hit 421 Misdirected Request due to HTTP/2 multiplexing quirks.
+        # SSE transport over HTTP. We MUST disable TrustedHostMiddleware
+        # before mcp.run() builds the Starlette app, otherwise hosted
+        # platforms (Render, Fly, Railway) where Host header doesn't match
+        # localhost get 421 Misdirected Request.
+        _disable_trusted_host_middleware()
+
         logging.info("Starting SSE HTTP transport on %s:%d "
                      "(GET /sse + POST /messages/{session_id})",
                      args.host, args.port)
@@ -361,6 +363,27 @@ def main():
     else:
         logging.info("Starting stdio transport")
         mcp.run(transport="stdio")
+
+
+def _disable_trusted_host_middleware() -> None:
+    """Patch Starlette's TrustedHostMiddleware to allow any Host header.
+
+    On Render/Fly/Railway the public hostname (xxx.onrender.com) differs
+    from the bind address. Starlette's default TrustedHostMiddleware sees
+    this mismatch as a misdirected request and returns 421. We don't need
+    that protection — Render's edge proxy already validates routing.
+    """
+    try:
+        import starlette.middleware.trustedhost as thm
+        _orig_init = thm.TrustedHostMiddleware.__init__
+
+        def _allow_all_init(self, app, allowed_hosts=None, www_redirect=True):
+            _orig_init(self, app, allowed_hosts=["*"], www_redirect=False)
+
+        thm.TrustedHostMiddleware.__init__ = _allow_all_init
+        logging.info("TrustedHostMiddleware patched to accept any Host header")
+    except Exception as e:
+        logging.warning("Could not patch TrustedHostMiddleware: %s", e)
 
 
 if __name__ == "__main__":
