@@ -33,6 +33,7 @@ import urllib.request
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.server import TransportSecuritySettings
 
 # ─────────────── Endpoints ───────────────
 
@@ -46,7 +47,12 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 _UA = "polymarket-mcp/0.2"
 _HTTP_TIMEOUT_S = 12.0
 
-mcp = FastMCP("polymarket-mcp")
+# Disable MCP's built-in DNS rebinding protection — when running behind a
+# PaaS proxy (Render / Fly / Smithery gateway) the Host header is dynamic
+# and would otherwise be rejected as "Invalid Host header" with HTTP 421.
+# The PaaS edge already validates routing, so we don't need this layer.
+_transport_sec = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+mcp = FastMCP("polymarket-mcp", transport_security=_transport_sec)
 
 
 # ─────────────── HTTP helpers ───────────────
@@ -348,27 +354,13 @@ def main():
                         format="%(asctime)s %(levelname)s %(message)s")
 
     if use_http:
-        # SSE transport over HTTP. We build the Starlette app ourselves and
-        # strip TrustedHostMiddleware so PaaS providers (Render, Fly, Railway)
-        # whose Host header is dynamic don't get blocked with 421
-        # "Invalid Host header". Render's edge proxy already validates
-        # routing — we don't need that protection inside our process.
+        # MCP's DNS rebinding protection is disabled above (TransportSecuritySettings).
+        # Run via uvicorn directly so we control host/port/proxy-headers cleanly.
         import uvicorn
         logging.info("Starting SSE HTTP transport on %s:%d "
                      "(GET /sse + POST /messages/{session_id})",
                      args.host, args.port)
         app = mcp.sse_app()
-        before = len(app.user_middleware)
-        app.user_middleware = [
-            m for m in app.user_middleware
-            if "TrustedHost" not in m.cls.__name__
-        ]
-        # Force Starlette to rebuild the middleware stack on next request
-        app.middleware_stack = None
-        after = len(app.user_middleware)
-        if after < before:
-            logging.info("Removed TrustedHostMiddleware (%d -> %d middlewares)",
-                         before, after)
         uvicorn.run(app, host=args.host, port=args.port,
                     log_level="info", access_log=True,
                     forwarded_allow_ips="*")
