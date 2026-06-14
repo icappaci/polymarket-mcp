@@ -328,17 +328,28 @@ def resource_top_markets() -> str:
 
 def main():
     import argparse
+    import os
     p = argparse.ArgumentParser()
     p.add_argument("--http", action="store_true",
-                   help="Run HTTP/SSE transport (for Smithery / web). Default: stdio.")
-    p.add_argument("--port", type=int, default=8000)
+                   help="Run HTTP/SSE transport (for Smithery / Render / web). "
+                        "Default: stdio (for Claude Desktop / Cursor).")
+    # Render and most PaaS providers set $PORT. Fall back to 8000 for local.
+    p.add_argument("--port", type=int,
+                   default=int(os.environ.get("PORT", "8000")))
+    p.add_argument("--host", default=os.environ.get("HOST", "0.0.0.0"),
+                   help="Bind host. 0.0.0.0 for hosted/Render, 127.0.0.1 for local-only.")
     args = p.parse_args()
+
+    # Render auto-enables HTTP mode when PORT env is present
+    is_hosted = "PORT" in os.environ
+    use_http = args.http or is_hosted
 
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                         format="%(asctime)s %(levelname)s %(message)s")
 
-    if args.http:
-        logging.info("Starting HTTP/SSE transport on :%d", args.port)
+    if use_http:
+        logging.info("Starting HTTP/SSE transport on %s:%d", args.host, args.port)
+        mcp.settings.host = args.host
         mcp.settings.port = args.port
         mcp.run(transport="streamable-http")
     else:
