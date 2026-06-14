@@ -1,0 +1,35 @@
+# Smithery.ai manifest for the Polymarket MCP server
+# Docs: https://smithery.ai/docs/build/project-config
+# Submit: https://smithery.ai/new
+
+startCommand:
+  type: stdio
+  command: python
+  args: ["-m", "mcp_server.server"]
+
+displayName: "Polymarket Data for AI Agents"
+description: "Polymarket data delivered to your AI agent: top wallets by 30-day PnL, live smart-money flow, market info, ECDSA-signed snapshots. Fully stateless — no database, no API keys."
+
+categories:
+  - finance
+  - data
+  - crypto
+  - prediction-markets
+
+tools:
+  - name: get_top_wallets
+    description: "Top Polymarket wallets ranked by 30-day realized PnL"
+  - name: get_top_markets
+    description: "Top active Polymarket markets by volume"
+  - name: get_wallet_history
+    description: "Recent trades for a given wallet (live)"
+  - name: get_market_info
+    description: "Market details by slug (Gamma API)"
+  - name: get_smart_money_flow
+    description: "Recent BUYs from top wallets in the last N minutes"
+  - name: get_signed_snapshot
+    description: "Current ECDSA-signed Polymarket snapshot"
+
+# Repository URL is set after the public push (e.g. github.com/icappaci/polymarket-mcp)
+repository:
+  url: "https://github.com/icappaci/polymarket-mcp"
